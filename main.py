@@ -449,19 +449,6 @@ async def callback(callback: CallbackQuery, state: FSMContext):
         case "page":
             await callback.answer()
             return
-        case "file":
-                user_xlsx_file = f"data/{user_id}_Сводка.xlsx"
-                save_xlsx(df, user_xlsx_file)
-                try:
-                    document = FSInputFile(user_xlsx_file)
-                    await callback.message.answer_document(
-                        document,
-                        caption="✅ Сводка по активным вкладам\."
-                    )
-                except Exception as e:
-                    await callback.message.answer(f"❌ Не удалось отправить файл: {e}")
-                await callback.answer()
-                return
 
     await state.update_data(m=m, sort_by=current_sort_by, sort_asc=current_sort_ascending)
 
@@ -478,6 +465,20 @@ async def callback(callback: CallbackQuery, state: FSMContext):
             ascending=current_sort_ascending,
             ignore_index=True
         )
+
+    if callback.data == "file":
+            user_xlsx_file = f"data/{user_id}_Сводка.xlsx"
+            save_xlsx(df_to_sort, user_xlsx_file)
+            try:
+                document = FSInputFile(user_xlsx_file)
+                await callback.message.answer_document(
+                    document,
+                    caption="✅ Сводка по активным вкладам\."
+                )
+            except Exception as e:
+                await callback.message.answer(f"❌ Не удалось отправить файл: {e}")
+            await callback.answer()
+            return
 
     df_display = prepare_dataframe_for_display(df_to_sort)
 
