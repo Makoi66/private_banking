@@ -20,6 +20,7 @@ import json
 from aiogram.exceptions import TelegramBadRequest
 import logging
 import time
+import sys
 
 
 class AddDataStates(StatesGroup):
@@ -335,6 +336,7 @@ async def cmd2(message: Message) -> None:
 @dp.message(Command("exit"))
 async def cmd3(message: Message) -> None:
     if int(message.chat.id) not in admins:
+        print(message.chat.id)
         return
 
     tmp = await message.answer("👋 *Сеанс завершен\.* До свидания\!")
@@ -505,6 +507,8 @@ async def callback(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
+    if message.chat.id not in admins:
+        return
     current_state = await state.get_state()
     if current_state is None:
         await message.answer("Вы сейчас не в процессе ввода данных\.")
@@ -647,7 +651,7 @@ if __name__ == "__main__":
             asyncio.run(main())
         except KeyboardInterrupt:
             logging.info("Бот остановлен вручную.")
-            break
+            sys.exit()
         except Exception as e:
             logging.error(f"Произошла критическая ошибка: {e}")
             print(f"Произошла критическая ошибка: {e}. Перезапуск через 15 секунд...")
