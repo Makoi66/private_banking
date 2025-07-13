@@ -336,7 +336,9 @@ async def cmd2(message: Message) -> None:
 @dp.message(Command("exit"))
 async def cmd3(message: Message) -> None:
     if int(message.chat.id) not in admins:
-        print(message.chat.id)
+        user_id = message.from_user.id
+        user_name = message.from_user.full_name
+        print(f"Пользователь {user_name} (ID: {user_id}) попробовал использовать команду /exit.")
         return
 
     tmp = await message.answer("👋 *Сеанс завершен\.* До свидания\!")
@@ -643,7 +645,16 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    log_level = logging.INFO
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+
+    logging.basicConfig(level=log_level, format=log_format, stream=sys.stdout)
+
+    file_handler = logging.FileHandler("bot.log", encoding='utf-8')
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(log_format))
+
+    logging.getLogger().addHandler(file_handler)
 
     while True:
         try:
@@ -651,8 +662,8 @@ if __name__ == "__main__":
             asyncio.run(main())
         except KeyboardInterrupt:
             logging.info("Бот остановлен вручную.")
-            sys.exit()
+            sys.exit(0)
         except Exception as e:
-            logging.error(f"Произошла критическая ошибка: {e}")
+            logging.error(f"Произошла критическая ошибка: {e}", exc_info=True)
             print(f"Произошла критическая ошибка: {e}. Перезапуск через 15 секунд...")
             time.sleep(15)
