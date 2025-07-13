@@ -16,6 +16,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import FSInputFile
 from aiogram.client.default import DefaultBotProperties
+import json
+from aiogram.exceptions import TelegramBadRequest
+import logging
+import time
 
 
 class AddDataStates(StatesGroup):
@@ -40,20 +44,74 @@ pd.set_option('future.no_silent_downcasting', True)
 DATE_COLS = ["Открытие", "Закрытие"]
 FLOAT_COLS = ["Сумма", "Процент", "Итог"]
 STR_COL = "Банк"
+rows_per_page = 7
 
 
 NOTIFICATION_DAYS = {1, 3, 7, 30}
-notified_events = set()
-ARCHIVE_FILE = "df_archive.xlsx"
 
 
-async def perform_check_logic():
-    global df
+def get_user_notified_path(user_id: int) -> str:
+    return f"data/{user_id}_notified.json"
 
+
+def load_notified_events(user_id: int) -> set:
+    file_path = get_user_notified_path(user_id)
+    if not path.exists(file_path):
+        return set()
     try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            list_of_tuples = [tuple(item) for item in json.load(f)]
+            return set(list_of_tuples)
+    except (json.JSONDecodeError, IOError):
+        return set()
+
+
+def save_notified_events(user_id: int, events: set):
+    file_path = get_user_notified_path(user_id)
+    list_of_tuples = list(events)
+
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(list_of_tuples, f, ensure_ascii=False, indent=4)
+
+
+if not os.path.exists('data'):
+    os.makedirs('data')
+
+
+def get_user_csv_path(user_id: int) -> str:
+    return f"data/{user_id}_df.csv"
+
+def get_user_archive_path(user_id: int) -> str:
+    return f"data/{user_id}_archive.xlsx"
+
+
+def prepare_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    df_display = df.copy()
+
+    current_moment = pd.Timestamp(datetime.datetime.now(tz=target_timezone))
+    time_difference = df_display['Закрытие'] - current_moment
+    days_array = ceil(time_difference.dt.total_seconds() / (24 * 3600))
+    df_display['Осталось'] = pd.Series(days_array, index=df_display.index).astype('Int64')
+
+    for col in DATE_COLS:
+        df_display[col] = df_display[col].dt.strftime('%d.%m.%Y')
+    for col in FLOAT_COLS:
+        df_display[col] = df_display[col].round(2)
+
+    return df_display.fillna('').astype(str)
+
+
+async def perform_check_logic(user_id: int):
+    try:
+        df = load_user_data(user_id)
         if df.empty:
             return
 
+        notified_events = load_notified_events(user_id)
+        has_new_notifications = False
         df_check = df.copy()
 
         current_moment = pd.Timestamp(datetime.datetime.now(tz=target_timezone))
@@ -79,18 +137,26 @@ async def perform_check_logic():
                     f"Дата закрытия: `{closing_date_str}`"
                 )
 
-                for admin_id in admins:
-                    await bot.send_message(admin_id, message_text)
+                recipients = set(admins)
+                recipients.add(user_id)
+
+                for recipient_id in recipients:
+                    await bot.send_message(recipient_id, message_text)
 
                 notified_events.add(event_key)
+                has_new_notifications = True
+
+        if has_new_notifications:
+            save_notified_events(user_id, notified_events)
+            print(f"Файл уведомлений для user_id {user_id} обновлен.")
 
         indices_to_process = df_check.index[df_check['Осталось'] <= -1].tolist()
 
         if indices_to_process:
-            if path.exists(ARCHIVE_FILE):
-                df_archive = pd.read_excel(ARCHIVE_FILE)
-                df_archive['Открытие'] = pd.to_datetime(df_archive['Открытие'])
-                df_archive['Закрытие'] = pd.to_datetime(df_archive['Закрытие'])
+            user_archive_file = get_user_archive_path(user_id)
+            user_csv_file = get_user_csv_path(user_id)
+            if path.exists(user_archive_file):
+                df_archive = pd.read_excel(user_archive_file, parse_dates=["Открытие", "Закрытие"])
             else:
                 archive_cols = [col for col in df.columns if col != 'Осталось']
                 df_archive = pd.DataFrame(columns=archive_cols)
@@ -101,15 +167,17 @@ async def perform_check_logic():
                 records_to_archive.drop(columns=['Осталось'], inplace=True)
 
             updated_archive = pd.concat([df_archive, records_to_archive], ignore_index=True)
-
             updated_archive = updated_archive.sort_values(by="Закрытие", ascending=False, ignore_index=True)
-
             updated_archive.drop_duplicates(subset=['Банк', 'Открытие', 'Сумма', 'Закрытие'], keep='first', inplace=True)
 
-            updated_archive.to_excel(ARCHIVE_FILE, index=False)
+            for col in DATE_COLS:
+                if col in updated_archive.columns and pd.api.types.is_datetime64_any_dtype(updated_archive[col]):
+                    updated_archive[col] = updated_archive[col].dt.strftime('%d.%m.%Y')
+
+            updated_archive.to_excel(user_archive_file, index=False)
             print(f"Архив обновлен. Добавлено {len(records_to_archive)} записей. Всего в архиве: {len(updated_archive)}.")
 
-            for index_to_archive  in indices_to_process:
+            for index_to_archive in indices_to_process:
                 deleted_row_info = df.loc[index_to_archive]
                 bank_name = deleted_row_info['Банк']
                 closing_date_str = deleted_row_info['Закрытие'].strftime('%d.%m.%Y')
@@ -119,17 +187,35 @@ async def perform_check_logic():
                     f"Вклад в банке *'{bank_name}'* \(закрытие `{closing_date_str}`\) был перемещен в архив завершенных вкладов\."
                 )
 
-                for admin_id in admins:
-                    await bot.send_message(admin_id, message_text)
+                recipients = set(admins)
+                recipients.add(user_id)
+
+                for recipient_id in recipients:
+                    await bot.send_message(recipient_id, message_text)
 
             df.drop(indices_to_process, inplace=True)
             df.reset_index(drop=True, inplace=True)
-            df.to_csv("df.csv", index=False)
+            df.to_csv(user_csv_file, index=False)
             print("DataFrame сохранен после удаления старых записей.")
 
     except Exception as e:
         print(f"Ошибка в фоновой задаче perform_check_logic: {e}")
         await asyncio.sleep(300)
+
+
+async def run_checks_for_all_users():
+    print(
+        f"[{datetime.datetime.now(target_timezone).strftime('%H:%M:%S')}] Запуск плановой проверки для всех пользователей...")
+    try:
+        user_files = [f for f in os.listdir('data') if f.endswith('_df.csv')]
+        for user_file in user_files:
+            try:
+                user_id = int(user_file.split('_')[0])
+                await perform_check_logic(user_id)
+            except Exception as e:
+                print(f"Не удалось обработать файл {user_file}: {e}")
+    except Exception as e:
+        print(f"Критическая ошибка при поиске файлов пользователей: {e}")
 
 
 async def reminders_scheduler():
@@ -149,57 +235,34 @@ async def reminders_scheduler():
 
         await asyncio.sleep(sleep_seconds)
 
-        await perform_check_logic()
+        await run_checks_for_all_users()
 
 
-rows_per_page = 1
+def load_user_data(user_id: int) -> pd.DataFrame:
+    user_csv_file = get_user_csv_path(user_id)
 
-
-def init_dataframe():
-    df = pd.DataFrame(columns=[STR_COL, "Открытие", "Сумма", "Процент", "Закрытие", "Осталось", "Итог"])
-
-    if path.exists("df.csv"):
-        df = pd.read_csv("df.csv", dayfirst=True)
+    if path.exists(user_csv_file):
+        df = pd.read_csv(user_csv_file, parse_dates=DATE_COLS)
         for col in FLOAT_COLS:
             df[col] = pd.to_numeric(df[col], ).astype(float)
         if STR_COL in df.columns:
             df[STR_COL] = df[STR_COL].astype(str)
         for col in DATE_COLS:
-            df[col] = pd.to_datetime(df[col], dayfirst=True)
             if df[col].dt.tz is None:
                 df[col] = df[col].dt.tz_localize(target_timezone)
             else:
                 df[col] = df[col].dt.tz_convert(target_timezone)
             df[col] = df[col].dt.normalize()
     else:
-        open_date = pd.to_datetime("11.07.2025", format="%d.%m.%Y").tz_localize(target_timezone).normalize()
-        close_date = pd.to_datetime("13.07.2025", format="%d.%m.%Y").tz_localize(target_timezone).normalize()
-        df.loc[len(df)] = {
-            STR_COL: "alpha",
-            "Открытие": open_date,
-            "Сумма": 30000000.0,
-            "Процент": 18.0,
-            "Закрытие": close_date,
-            "Осталось": nan,
-            "Итог": nan
-        }
-        df["Итог"] = df["Сумма"] * (1 + ((df["Процент"] / (100 * 365)) * (df["Закрытие"] - df["Открытие"]).dt.days))
-        for col in FLOAT_COLS:
-            df[col] = pd.to_numeric(df[col]).astype(float)
-        df.to_csv("df.csv", index=False)
+        df = pd.DataFrame(columns=[STR_COL, "Открытие", "Сумма", "Процент", "Закрытие", "Осталось", "Итог"])
+        df.to_csv(user_csv_file, index=False)
 
     return df
 
-global df, msg, m, current_sort_by, current_sort_ascending
-m = 0
-current_sort_by = None
-current_sort_ascending = None
 
-def make_arrows():
-    global m
-
+def make_arrows(df: pd.DataFrame, m: int) -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
-    n = int(ceil(len(df) / rows_per_page))
+    n = int(ceil(len(df) / rows_per_page)) if not df.empty else 1
 
     builder.row(
         InlineKeyboardButton(text="<--", callback_data="back"),
@@ -212,8 +275,18 @@ def make_arrows():
 
 
 def prepare_display(df_display, curr_page):
-    headers = df_display[curr_page * rows_per_page:(curr_page + 1) * rows_per_page].columns.tolist()
-    table_date = df_display[curr_page * rows_per_page:(curr_page + 1) * rows_per_page].values.tolist()
+    headers = df_display.columns.tolist()
+
+    if df_display.empty:
+        table_date = []
+    else:
+        paginated_df = df_display[curr_page * rows_per_page:(curr_page + 1) * rows_per_page]
+        table_date = paginated_df.values.tolist()
+
+    if not table_date:
+        return tabulate([], headers=headers,
+                        tablefmt="rounded_grid",
+                        numalign="center", stralign="center")
 
     table_simple_grid = tabulate(table_date, headers=headers,
                                  tablefmt="rounded_grid", floatfmt=".2f",
@@ -228,23 +301,21 @@ async def cmd1(message: Message) -> None:
     if int(message.chat.id) not in admins:
         return
 
-    global msg
     for i in range(30):
         try:
             await bot.delete_message(message.chat.id, message.message_id - i)
         except:
             break
+
     msg = await message.answer(f"👋 Здравствуйте, *{getenv(str(message.chat.id))}*\!\n\nЯ ваш финансовый помощник\.")
     await asyncio.sleep(3)
-    msg = await msg.edit_text("⚙️ Выберите действие в меню или с помощью команд\.")
+    await msg.edit_text("⚙️ Выберите действие в меню или с помощью команд\.")
 
 
 @dp.message(Command("table"))
 async def cmd2(message: Message) -> None:
     if int(message.chat.id) not in admins:
         return
-
-    global msg
 
     for i in range(30):
         try:
@@ -257,7 +328,7 @@ async def cmd2(message: Message) -> None:
     match.row(InlineKeyboardButton(text=f"Доходности (по убыванию ↓)", callback_data="percent_down"))
     match.row(InlineKeyboardButton(text=f"Оставшиеся дни (по убыванию ↓)", callback_data="days_down"))
     match.row(InlineKeyboardButton(text=f"Доходности (по возрастанию ↑)", callback_data="percent_up"))
-    msg = await message.answer("📊 *Сортировка таблицы*\n\n"
+    await message.answer("📊 *Сортировка таблицы*\n\n"
     "Выберите, по какому параметру отсортировать активные вклады:", reply_markup=match.as_markup())
 
 
@@ -281,9 +352,10 @@ async def cmd_archive(message: Message):
     if int(message.chat.id) not in admins:
         return
 
-    if path.exists(ARCHIVE_FILE):
+    user_archive_path = get_user_archive_path(message.from_user.id)
+    if path.exists(user_archive_path):
         try:
-            document = FSInputFile(ARCHIVE_FILE)
+            document = FSInputFile(user_archive_path)
             await message.answer_document(
                 document,
                 caption="✅ *Архив завершенных вкладов*\."
@@ -294,36 +366,55 @@ async def cmd_archive(message: Message):
         await message.answer("ℹ️ Файл архива еще не создан\. Он появится автоматически, когда завершится первый вклад\.")
 
 
-def save_xlsx(df_display):
-    if path.exists("Сводка.xlsx"):
-        os.remove("Сводка.xlsx")
+def save_xlsx(df_display, file_path: str):
+    if path.exists(file_path):
+        os.remove(file_path)
+
     df_excel = df_display.copy()
-    df_excel.to_excel("Сводка.xlsx", index=False)
+
+    if not df_excel.empty:
+        current_moment = pd.Timestamp(datetime.datetime.now(tz=target_timezone))
+        time_difference = df_excel['Закрытие'] - current_moment
+        df_excel['Осталось'] = ceil(time_difference.dt.total_seconds() / (24 * 3600)).astype('Int64')
+
+        for col in DATE_COLS:
+            if col in df_excel.columns and pd.api.types.is_datetime64_any_dtype(df_excel[col]):
+                df_excel[col] = df_excel[col].dt.strftime('%d.%m.%Y')
+
+    df_excel.to_excel(file_path, index=False)
 
 
 @dp.callback_query(F.data.in_({"days_up", "days_down", "percent_up", "percent_down",
                                "next", "back", "page", "file"}))
-async def callback(callback: CallbackQuery):
-    if int(callback.message.chat.id) not in admins:
+async def callback(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if user_id not in admins:
         return
 
-    global df, m, msg, current_sort_by, current_sort_ascending
+    df = load_user_data(user_id)
+    session_data = await state.get_data()
+    m = session_data.get('m', 0)
+    current_sort_by = session_data.get('sort_by')
+    current_sort_ascending = session_data.get('sort_asc')
 
-    df_display = df.copy()
-    date_format = "%d.%m.%Y"
+    if df.empty:
+        table_title = "📊 *Активные вклады*"
+        empty_table_grid = prepare_display(df, 0)
 
-    for col in DATE_COLS:
-        df_display[col] = df_display[col].dt.strftime(date_format).fillna('')
-    current_moment = pd.Timestamp(datetime.datetime.now(tz=target_timezone))
-    time_difference = df['Закрытие'] - current_moment
-    days_array = ceil(time_difference.dt.total_seconds().values / (24 * 3600))
-
-    df_display['Осталось'] = pd.Series(days_array, index=df_display.index).astype(pd.Int64Dtype()).astype(
-        object).fillna('')
-
-    for col in FLOAT_COLS:
-        df_display[col] = df_display[col].round(2)
-        df_display[col] = df_display[col].astype(object).fillna('')
+        final_message_text = (
+                f"{table_title}\n\n"
+                "```\n" + empty_table_grid + "\n```\n"
+                                             "_\(У вас пока нет активных вкладов\)_"
+        )
+        try:
+            await callback.message.edit_text(
+                final_message_text,
+                reply_markup=make_arrows(df, m).as_markup()
+            )
+        except TelegramBadRequest:
+            pass
+        await callback.answer()
+        return
 
     match callback.data:
         case "days_up":
@@ -343,7 +434,7 @@ async def callback(callback: CallbackQuery):
             current_sort_ascending = False
             m = 0
         case "next":
-            n = int(ceil(len(df_display) / rows_per_page))
+            n = int(ceil(len(df) / rows_per_page)) if not df.empty else 1
             if m < (n - 1):
                 m += 1
             else:
@@ -359,24 +450,36 @@ async def callback(callback: CallbackQuery):
             await callback.answer()
             return
         case "file":
-            try:
-                document = FSInputFile("Сводка.xlsx")
-                await callback.message.answer_document(
-                    document,
-                    caption="✅ Сводка по активным вкладам\."
-                )
-            except Exception as e:
-                await callback.message.answer(f"❌ Не удалось отправить файл: {e}")
-            await callback.answer()
-            return
+                user_xlsx_file = f"data/{user_id}_Сводка.xlsx"
+                save_xlsx(df, user_xlsx_file)
+                try:
+                    document = FSInputFile(user_xlsx_file)
+                    await callback.message.answer_document(
+                        document,
+                        caption="✅ Сводка по активным вкладам\."
+                    )
+                except Exception as e:
+                    await callback.message.answer(f"❌ Не удалось отправить файл: {e}")
+                await callback.answer()
+                return
+
+    await state.update_data(m=m, sort_by=current_sort_by, sort_asc=current_sort_ascending)
+
+    df_to_sort = df.copy()
 
     if current_sort_by:
-        df_display = df_display.sort_values(
+        if current_sort_by == "Осталось":
+            current_moment = pd.Timestamp(datetime.datetime.now(tz=target_timezone))
+            time_difference = df_to_sort['Закрытие'] - current_moment
+            df_to_sort['Осталось'] = ceil(time_difference.dt.total_seconds() / (24 * 3600))
+
+        df_to_sort = df_to_sort.sort_values(
             by=current_sort_by,
             ascending=current_sort_ascending,
             ignore_index=True
         )
-        save_xlsx(df_display)
+
+    df_display = prepare_dataframe_for_display(df_to_sort)
 
     table_title = "📊 *Активные вклады*"
 
@@ -392,9 +495,9 @@ async def callback(callback: CallbackQuery):
             "```\n" + prepare_display(df_display, m) + "\n```"
     )
 
-    await msg.edit_text(
+    await callback.message.edit_text(
         final_message_text,
-        reply_markup=make_arrows().as_markup()
+        reply_markup=make_arrows(df, m).as_markup()
     )
     await callback.answer()
 
@@ -492,10 +595,13 @@ async def process_closing_date(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.in_({"confirm_add_data", "cancel_add_data"}), AddDataStates.confirm_data)
 async def confirm_cancel_add_data(callback_query: CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+
     if callback_query.data == "confirm_add_data":
         user_data = await state.get_data()
 
-        global df
+        df = load_user_data(user_id)
+
         new_row = {
             STR_COL: user_data['bank'],
             "Открытие": user_data['opening_date'],
@@ -506,7 +612,8 @@ async def confirm_cancel_add_data(callback_query: CallbackQuery, state: FSMConte
             "Итог": user_data['sum'] * (1 + ((user_data['percent'] / (100 * 365)) * (user_data['closing_date'] - user_data['opening_date']).days))
         }
         df.loc[len(df)] = new_row
-        df.to_csv("df.csv", index=False)
+        df.to_csv(get_user_csv_path(user_id), index=False)
+
         await callback_query.message.edit_text("✅ *Успешно\!*\n\nДанные о новом вкладе добавлены\.")
     else:
         await callback_query.message.edit_text("❌ *Отменено\.*\n\nДобавление данных прервано\.")
@@ -523,15 +630,24 @@ async def confirm_cancel_add_data(callback_query: CallbackQuery, state: FSMConte
 
 async def main() -> None:
     print("Выполняется первоначальная проверка при запуске...")
-    await perform_check_logic()
-
+    await run_checks_for_all_users()
     asyncio.create_task(reminders_scheduler())
 
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    global df
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    df = init_dataframe()
-    asyncio.run(main())
+    while True:
+        try:
+            logging.info("Запуск бота...")
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            logging.info("Бот остановлен вручную.")
+            break
+        except Exception as e:
+            logging.error(f"Произошла критическая ошибка: {e}")
+            print(f"Произошла критическая ошибка: {e}. Перезапуск через 15 секунд...")
+            time.sleep(15)
