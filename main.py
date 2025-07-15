@@ -39,6 +39,9 @@ target_timezone = pytz.timezone("Europe/Moscow")
 bot = Bot(getenv("TOKEN"), default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN_V2))
 dp = Dispatcher()
 admins = list(map(int, getenv("ADMINS").split(",")))
+users = list(map(int, getenv("USERS").split(",")))
+
+allowed_users = set(admins + users)
 
 
 pd.set_option('future.no_silent_downcasting', True)
@@ -306,7 +309,7 @@ def prepare_display(df_display, curr_page):
 
 @dp.message(CommandStart())
 async def cmd1(message: Message) -> None:
-    if int(message.chat.id) not in admins:
+    if int(message.chat.id) not in allowed_users:
         return
 
     for i in range(30):
@@ -322,7 +325,7 @@ async def cmd1(message: Message) -> None:
 
 @dp.message(Command("table"))
 async def cmd2(message: Message) -> None:
-    if int(message.chat.id) not in admins:
+    if int(message.chat.id) not in allowed_users:
         return
 
     for i in range(30):
@@ -342,7 +345,7 @@ async def cmd2(message: Message) -> None:
 
 @dp.message(Command("exit"))
 async def cmd3(message: Message) -> None:
-    if int(message.chat.id) not in admins:
+    if int(message.chat.id) not in allowed_users:
         user_id = message.from_user.id
         user_name = message.from_user.full_name
         print(f"Пользователь {user_name} (ID: {user_id}) попробовал использовать команду /exit.")
@@ -360,7 +363,7 @@ async def cmd3(message: Message) -> None:
 
 @dp.message(Command("archive"))
 async def cmd_archive(message: Message):
-    if int(message.chat.id) not in admins:
+    if int(message.chat.id) not in allowed_users:
         return
 
     user_archive_path = get_user_archive_path(message.from_user.id)
@@ -399,7 +402,7 @@ def save_xlsx(df_display, file_path: str):
                                "next", "back", "page", "file"}))
 async def callback(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    if user_id not in admins:
+    if user_id not in allowed_users:
         return
 
     df = load_user_data(user_id)
@@ -516,8 +519,9 @@ async def callback(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
-    if message.chat.id not in admins:
+    if int(message.chat.id) not in allowed_users:
         return
+
     current_state = await state.get_state()
     if current_state is None:
         await message.answer("Вы сейчас не в процессе ввода данных\.")
@@ -528,7 +532,7 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 @dp.message(Command("add_date"))
 async def cmd_add_data(message: Message, state: FSMContext):
-    if int(message.chat.id) not in admins:
+    if int(message.chat.id) not in allowed_users:
         return
 
     for i in range(30):
@@ -541,6 +545,9 @@ async def cmd_add_data(message: Message, state: FSMContext):
 
 @dp.message(AddDataStates.waiting_for_bank)
 async def process_bank(message: Message, state: FSMContext):
+    if message.from_user.id not in allowed_users:
+        await state.clear()
+        return
 
     await state.update_data(bank=message.text)
     await state.set_state(AddDataStates.waiting_for_opening_date)
@@ -548,6 +555,10 @@ async def process_bank(message: Message, state: FSMContext):
 
 @dp.message(AddDataStates.waiting_for_opening_date)
 async def process_opening_date(message: Message, state: FSMContext):
+    if message.from_user.id not in allowed_users:
+        await state.clear()
+        return
+
     try:
         parsed_date = pd.to_datetime(message.text, format="%d.%m.%Y")
         parsed_date = parsed_date.tz_localize(target_timezone).normalize()
@@ -560,6 +571,10 @@ async def process_opening_date(message: Message, state: FSMContext):
 
 @dp.message(AddDataStates.waiting_for_sum)
 async def process_sum(message: Message, state: FSMContext):
+    if message.from_user.id not in allowed_users:
+        await state.clear()
+        return
+
     try:
         parsed_sum = float(message.text)
         await state.update_data(sum=parsed_sum)
@@ -570,6 +585,10 @@ async def process_sum(message: Message, state: FSMContext):
 
 @dp.message(AddDataStates.waiting_for_percent)
 async def process_percent(message: Message, state: FSMContext):
+    if message.from_user.id not in allowed_users:
+        await state.clear()
+        return
+
     try:
         pardes_percent = float(message.text)
 
@@ -581,6 +600,10 @@ async def process_percent(message: Message, state: FSMContext):
 
 @dp.message(AddDataStates.waiting_for_closing_date)
 async def process_closing_date(message: Message, state: FSMContext):
+    if message.from_user.id not in allowed_users:
+        await state.clear()
+        return
+
     try:
         parsed_date = pd.to_datetime(message.text, format="%d.%m.%Y")
         parsed_date = parsed_date.tz_localize(target_timezone).normalize()
@@ -610,6 +633,9 @@ async def process_closing_date(message: Message, state: FSMContext):
 @dp.callback_query(F.data.in_({"confirm_add_data", "cancel_add_data"}), AddDataStates.confirm_data)
 async def confirm_cancel_add_data(callback_query: CallbackQuery, state: FSMContext):
     user_id = callback_query.from_user.id
+    if user_id not in allowed_users:
+        await state.clear()
+        return
 
     if callback_query.data == "confirm_add_data":
         user_data = await state.get_data()
