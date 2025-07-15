@@ -158,6 +158,13 @@ async def perform_check_logic(user_id: int):
             user_csv_file = get_user_csv_path(user_id)
             if path.exists(user_archive_file):
                 df_archive = pd.read_excel(user_archive_file, parse_dates=["Открытие", "Закрытие"])
+                for col in DATE_COLS:
+                    if col in df_archive.columns:
+                        if df_archive[col].dt.tz is None:
+                            df_archive[col] = df_archive[col].dt.tz_localize(target_timezone)
+                        else:
+                            df_archive[col] = df_archive[col].dt.tz_convert(target_timezone)
+                        df_archive[col] = df_archive[col].dt.normalize()
             else:
                 archive_cols = [col for col in df.columns if col != 'Осталось']
                 df_archive = pd.DataFrame(columns=archive_cols)
