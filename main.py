@@ -265,7 +265,16 @@ def load_user_data(user_id: int) -> pd.DataFrame:
                 df[col] = df[col].dt.tz_convert(target_timezone)
             df[col] = df[col].dt.normalize()
     else:
-        df = pd.DataFrame(columns=[STR_COL, "Открытие", "Сумма", "Процент", "Закрытие", "Осталось", "Итог"])
+        columns_with_types = {
+            STR_COL: pd.Series(dtype='str'),
+            "Открытие": pd.Series(dtype=f'datetime64[ns, {target_timezone}]'),
+            "Сумма": pd.Series(dtype='float'),
+            "Процент": pd.Series(dtype='float'),
+            "Закрытие": pd.Series(dtype=f'datetime64[ns, {target_timezone}]'),
+            "Осталось": pd.Series(dtype='float'),  # Будет NaN
+            "Итог": pd.Series(dtype='float')
+        }
+        df = pd.DataFrame(columns_with_types)
         df.to_csv(user_csv_file, index=False)
 
     return df
