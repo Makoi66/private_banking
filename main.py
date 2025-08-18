@@ -30,6 +30,7 @@ class AddDataStates(StatesGroup):
     waiting_for_percent = State()
     waiting_for_closing_date = State()
     confirm_data = State()
+    waiting_for_delete_choice = State()
 
 
 load_dotenv()
@@ -163,6 +164,7 @@ async def perform_check_logic(user_id: int):
                 df_archive = pd.read_excel(user_archive_file, parse_dates=["Открытие", "Закрытие"])
                 for col in DATE_COLS:
                     if col in df_archive.columns:
+                        df_archive[col] = pd.to_datetime(df_archive[col], dayfirst=True, errors='coerce')
                         if df_archive[col].dt.tz is None:
                             df_archive[col] = df_archive[col].dt.tz_localize(target_timezone)
                         else:
@@ -330,6 +332,45 @@ async def cmd1(message: Message) -> None:
     msg = await message.answer(f"👋 Здравствуйте, *{getenv(str(message.chat.id))}*\!\n\nЯ ваш финансовый помощник\.")
     await asyncio.sleep(3)
     await msg.edit_text("⚙️ Выберите действие в меню или с помощью команд\.")
+
+
+@dp.message(Command("delete"))
+async def cmd_delete_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if user_id not in allowed_users:
+        return
+
+    df = load_user_data(user_id)
+
+    if df.empty:
+        print(111)
+        await message.answer("ℹ️ У вас нет записей для удаления\.")
+        return
+
+    df = df.sort_values(by="Закрытие", ascending=True, ignore_index=True)
+
+    records_list_text = []
+    for index, row in df.iterrows():
+        closing_date_str = row['Закрытие'].strftime('%d.%m.%Y')
+        record_info = (
+            f"*{index + 1}*: `{row['Банк']}` "
+            f"на сумму `{row['Сумма']:.2f}` "
+            f"\(до `{closing_date_str}`\)"
+        )
+        records_list_text.append(record_info)
+
+    await state.update_data(df_for_delete=df.to_dict('records'))
+
+    final_message = (
+            "🗑️ *Выберите запись для удаления*\n\n" +
+            "\n".join(records_list_text) +
+            "\n\nОтправьте номер записи, которую хотите удалить\. Для отмены отправьте `0`\."
+    )
+
+    #final_message = final_message.replace('.', '\.')
+    print(final_message)
+    await message.answer(final_message)
+    await state.set_state(AddDataStates.waiting_for_delete_choice)
 
 
 @dp.message(Command("table"))
@@ -537,6 +578,54 @@ async def cmd_cancel(message: Message, state: FSMContext):
     else:
         await state.clear()
         await message.answer("Процесс ввода данных отменен\.")
+
+
+@dp.message(AddDataStates.waiting_for_delete_choice)
+async def process_delete_choice(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    try:
+        choice = int(message.text)
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число\.")
+        return
+
+    if choice == 0:
+        await message.answer("✅ Удаление отменено\.")
+        await state.clear()
+        return
+
+    user_data = await state.get_data()
+    df_list = user_data.get('df_for_delete')
+
+    if not df_list or not (0 < choice <= len(df_list)):
+        await message.answer(f"❌ Неверный номер\. Введите число от 1 до {len(df_list) if df_list else 'N'}\.")
+        return
+
+    record_to_delete = df_list[choice - 1]
+
+    df_full = load_user_data(user_id)
+
+    # Находим индекс строки в "живом" DataFrame, которую нужно удалить
+    # Сравниваем по нескольким ключевым полям для надежности
+    original_index = df_full[
+        (df_full['Банк'] == record_to_delete['Банк']) &
+        (df_full['Сумма'] == record_to_delete['Сумма']) &
+        # pandas корректно сравнит datetime с таймзоной и без
+        (pd.to_datetime(df_full['Закрытие']) == pd.to_datetime(record_to_delete['Закрытие']))
+        ].index
+
+    if original_index.empty:
+        await message.answer("❌ Не удалось найти запись для удаления\. Возможно, она уже была удалена\.")
+        await state.clear()
+        return
+
+    # Удаляем строку по найденному индексу
+    df_full.drop(original_index, inplace=True)
+    df_full.to_csv(get_user_csv_path(user_id), index=False)
+
+    deleted_info = f"`{record_to_delete['Банк']}` на сумму `{record_to_delete['Сумма']:.2f}`"
+    await message.answer(f"✅ Запись успешно удалена:\n{deleted_info}")
+    await state.clear()
 
 
 @dp.message(Command("add_date"))
